@@ -10,10 +10,11 @@ status is updated in the same commit that lands the component.
 
 | Component | Module | Status |
 |---|---|---|
-| Model (Llama forward pass, weight loading) | `tinyserve.model` | planned |
+| Model (Llama forward pass, weight loading) | `tinyserve.model` | implemented, no KV cache yet |
 | Paged KV cache | `tinyserve.kv_cache` | planned |
 | Scheduler | `tinyserve.scheduler` | planned |
-| Engine (step loop, sampling) | `tinyserve.engine` | planned |
+| Sampling (temperature, top-p) | `tinyserve.sampling` | implemented |
+| Engine (step loop) | `tinyserve.engine` | planned |
 | HTTP server | `tinyserve.server` | planned |
 | Metrics | `tinyserve.metrics` | planned |
 | Int8 weight quantization | `tinyserve.model.quant` | planned |
@@ -44,6 +45,13 @@ A plain PyTorch implementation of the Llama architecture: RMSNorm, rotary positi
 grouped-query attention, SwiGLU MLP. Weights are read directly from the Hugging Face
 safetensors checkpoint. Hugging Face `transformers` is used only in tests as a reference to
 check that our logits match.
+
+Weights are loaded in fp16 on GPU and fp32 on CPU. fp16 is used instead of bf16 because the
+T4 targeted for deployment has no fast bf16 path. The model is built on PyTorch's `meta`
+device and the checkpoint tensors are assigned directly, so parameters are never allocated twice.
+For now the forward pass takes a padded `[batch, seq_len]` batch and recomputes attention over
+the whole sequence. Reading keys and values from the paged cache replaces this in the engine
+phase.
 
 The reason for writing the forward pass instead of calling `transformers` is the attention
 call: continuous batching needs every sequence in a batch to read keys and values from its own

@@ -18,6 +18,7 @@ Run the same checks as CI. All of them must pass:
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
+uv run pytest
 ```
 
 - Keep each pull request focused on one change.

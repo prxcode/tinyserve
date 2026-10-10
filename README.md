@@ -6,8 +6,9 @@ A small LLM inference server written from the model up: a plain PyTorch Llama im
 paged KV cache, a continuous-batching scheduler and a streaming HTTP API. It serves
 [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) on a single GPU.
 
-> **Status: early development.** Only the project scaffold exists so far. The roadmap below
-> tracks what is implemented; nothing unchecked should be assumed to work.
+> **Status: early development.** The model runs and matches the reference implementation, but
+> there is no cache, scheduler or server yet. The roadmap below tracks what is implemented;
+> nothing unchecked should be assumed to work.
 
 ## Why
 
@@ -27,7 +28,7 @@ behind the main choices is in [docs/decisions.md](docs/decisions.md).
 ## Roadmap
 
 - [x] Project scaffold, tooling and CI
-- [ ] Llama forward pass with logits checked against Hugging Face `transformers`
+- [x] Llama forward pass with logits checked against Hugging Face `transformers`
 - [ ] Paged KV cache block allocator
 - [ ] Scheduler with continuous batching and preemption
 - [ ] Streaming HTTP API with backpressure and cancellation
@@ -48,13 +49,23 @@ uv sync --extra cu126   # NVIDIA GPU with a CUDA 12.6 compatible driver
 uv sync --extra cpu     # CPU only (used by CI)
 ```
 
+Download the model (2.2 GB, pinned to a fixed Hub revision, stored in the git-ignored `models/`):
+
+```bash
+uv run python -m tinyserve.download
+```
+
 Run the same checks as CI:
 
 ```bash
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
+uv run pytest
 ```
+
+Tests that need the real weights skip themselves when the weights are missing. See
+[docs/testing.md](docs/testing.md) for what each suite covers.
 
 ## Limitations
 
