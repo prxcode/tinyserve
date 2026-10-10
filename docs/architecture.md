@@ -11,7 +11,7 @@ status is updated in the same commit that lands the component.
 | Component | Module | Status |
 |---|---|---|
 | Model (Llama forward pass, weight loading) | `tinyserve.model` | implemented, no KV cache yet |
-| Paged KV cache | `tinyserve.kv_cache` | planned |
+| Paged KV cache (allocator, block tables, storage) | `tinyserve.block_manager`, `tinyserve.kv_cache` | implemented, not yet used by attention |
 | Scheduler | `tinyserve.scheduler` | planned |
 | Sampling (temperature, top-p) | `tinyserve.sampling` | implemented |
 | Engine (step loop) | `tinyserve.engine` | planned |
@@ -49,6 +49,8 @@ check that our logits match.
 Weights are loaded in fp16 on GPU and fp32 on CPU. fp16 is used instead of bf16 because the
 T4 targeted for deployment has no fast bf16 path. The model is built on PyTorch's `meta`
 device and the checkpoint tensors are assigned directly, so parameters are never allocated twice.
+Each tensor is converted to the target dtype on CPU before it is moved to the GPU. Converting
+on the GPU briefly held two copies of every weight and peaked at 4.2 GB for 2.1 GB of weights.
 For now the forward pass takes a padded `[batch, seq_len]` batch and recomputes attention over
 the whole sequence. Reading keys and values from the paged cache replaces this in the engine
 phase.
@@ -60,22 +62,41 @@ non-contiguous cache blocks, at its own position. That does not fit the padded
 
 ## Paged KV cache
 
-KV memory is one preallocated tensor per layer, split into fixed-size blocks
-(e.g. 16 tokens each):
+The cache is split into two parts:
+
+- **`BlockManager`** (pure Python, no torch) decides which blocks belong to which sequence.
+- **`KVCache`** owns the GPU tensors and only reads and writes slots it is given.
+
+Keys and values are each one preallocated tensor covering every layer. Each layer's storage is
+a flat array of token slots:
 
 ```
-k_cache[layer]: [num_blocks, block_size, num_kv_heads, head_dim]   (same for v_cache)
+keys, values: [num_layers, num_blocks * block_size, num_kv_heads, head_dim]
 ```
 
 Each sequence owns a block table, a list of block ids in token order. Token `t` of a sequence
-lives in block `table[t // block_size]` at offset `t % block_size`.
+lives in block `table[t // block_size]` at offset `t % block_size`, which is the flat slot
+`block * block_size + offset`.
 
-- `num_blocks` is computed at startup from free GPU memory after the weights are loaded,
-  times a configurable utilization fraction. Memory never grows after startup, so an
-  out-of-memory error during serving means a bug, not load.
 - Allocation is per block, so the only waste is the unfilled tail of each sequence's last
   block. A contiguous per-request buffer would have to reserve `max_tokens` up front.
-- The allocator is a free list. Allocating and freeing are O(1) and touch no GPU memory.
+- The allocator is a free list used as a stack, so allocating and freeing are O(1). Double
+  frees raise instead of silently corrupting the free list.
+- `reserve()` is all-or-nothing. A failed reservation leaves the sequence exactly as it was,
+  so the scheduler can preempt and retry without cleanup.
+- For attention, padded block tables are turned into `[batch, context_len]` slot indices with
+  tensor ops. A Python loop over every context token would cost milliseconds per step.
+- Unused slots are zero-initialized, not left empty. Padded reads land on them, and NaN garbage
+  would survive a zero attention weight (`0 * NaN = NaN`).
+- Memory never grows after startup, so an out-of-memory error during serving means a bug,
+  not load.
+
+**Sizing.** One TinyLlama block of 16 tokens costs
+`2 (K,V) × 22 layers × 4 kv heads × 64 dims × 2 bytes × 16 = 352 KiB`, or 22 KiB per token.
+On the development GPU (RTX 3050 Ti, 4 GB), 1098 MiB are free after loading the 2100 MiB of
+fp16 weights. A 1 GiB cache holds 2978 blocks (47,648 tokens), and allocating it uses exactly
+the predicted amount. The engine must also leave room for activations, so the real block count
+is set in the engine phase by profiling peak memory during a maximum-size forward pass.
 
 ## Scheduler
 
