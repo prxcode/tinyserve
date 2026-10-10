@@ -88,3 +88,17 @@ def test_fp16_gpu_logits_stay_close_to_fp32(
     # Measured max differences were 0.12-0.22 on logits up to ~25; 0.5 leaves headroom.
     assert torch.equal(actual.argmax(dim=-1), expected.argmax(dim=-1))
     assert (actual - expected).abs().max() < 0.5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
+def test_gpu_load_peaks_at_one_copy_of_the_weights() -> None:
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    baseline = torch.cuda.memory_allocated()
+
+    model = load_model(MODEL_DIR, "cuda", torch.float16)
+
+    weights = sum(p.nbytes for p in model.parameters())
+    peak = torch.cuda.max_memory_allocated() - baseline
+    # Converting dtype on the GPU used to double the peak (4.2 GB for 2.1 GB of weights).
+    assert peak < weights * 1.1

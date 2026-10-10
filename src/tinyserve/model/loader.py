@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import torch
-from safetensors.torch import load_file
+from safetensors import safe_open
 
 from tinyserve.model.config import LlamaConfig
 from tinyserve.model.llama import LlamaForCausalLM
@@ -37,11 +37,13 @@ def load_model(
 
     state: dict[str, torch.Tensor] = {}
     for path in checkpoint_files(model_dir):
-        for name, tensor in load_file(path, device=str(device)).items():
-            # Some older checkpoints store the rotary frequencies; they are recomputed instead.
-            if name.endswith("rotary_emb.inv_freq"):
-                continue
-            state[name] = tensor.to(dtype)
+        with safe_open(path, framework="pt", device="cpu") as checkpoint:
+            for name in checkpoint.keys():  # noqa: SIM118 - safe_open is not a dict
+                # Some older checkpoints store the rotary frequencies; they are recomputed instead.
+                if name.endswith("rotary_emb.inv_freq"):
+                    continue
+                # Convert on CPU first so the GPU never holds two copies of a weight.
+                state[name] = checkpoint.get_tensor(name).to(dtype).to(device)
 
     if config.tie_word_embeddings:
         state.setdefault("lm_head.weight", state["model.embed_tokens.weight"])
