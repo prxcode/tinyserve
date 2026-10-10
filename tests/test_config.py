@@ -46,11 +46,20 @@ def test_first_eos_id_is_used_when_given_a_list() -> None:
     assert LlamaConfig.from_dict(raw).eos_token_id == 2
 
 
+def test_reads_rope_theta_from_transformers_v5_layout() -> None:
+    raw = tinyllama_config()
+    del raw["rope_theta"]
+    raw["rope_parameters"] = {"rope_type": "default", "rope_theta": 500.0}
+
+    assert LlamaConfig.from_dict(raw).rope_theta == 500.0
+
+
 @pytest.mark.parametrize(
     "override",
     [
         {"model_type": "mistral"},
         {"rope_scaling": {"type": "linear", "factor": 2.0}},
+        {"rope_parameters": {"rope_type": "llama3", "rope_theta": 500000.0}},
         {"attention_bias": True},
         {"num_key_value_heads": 5},
     ],

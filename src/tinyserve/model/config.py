@@ -24,8 +24,10 @@ class LlamaConfig:
     def from_dict(cls, raw: dict[str, Any]) -> "LlamaConfig":
         if raw.get("model_type") != "llama":
             raise ValueError(f"expected model_type 'llama', got {raw.get('model_type')!r}")
-        if raw.get("rope_scaling"):
-            raise ValueError("rope_scaling is not supported")
+        # transformers 5 moved rope_theta into rope_parameters; older configs keep it top-level.
+        rope = raw.get("rope_parameters") or {}
+        if raw.get("rope_scaling") or rope.get("rope_type", "default") != "default":
+            raise ValueError("only default rotary embeddings are supported, not rope scaling")
         if raw.get("attention_bias") or raw.get("mlp_bias"):
             raise ValueError("bias in attention or MLP layers is not supported")
 
@@ -48,7 +50,7 @@ class LlamaConfig:
             head_dim=raw.get("head_dim") or raw["hidden_size"] // num_heads,
             max_position_embeddings=raw["max_position_embeddings"],
             rms_norm_eps=raw["rms_norm_eps"],
-            rope_theta=raw.get("rope_theta", 10000.0),
+            rope_theta=rope.get("rope_theta", raw.get("rope_theta", 10000.0)),
             tie_word_embeddings=raw.get("tie_word_embeddings", False),
             bos_token_id=raw.get("bos_token_id"),
             eos_token_id=eos,
