@@ -67,6 +67,8 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["src"]
+# torch types nn.Module.__call__ as returning Any, which would flag every layer call.
+warn_return_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
