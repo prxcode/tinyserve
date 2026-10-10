@@ -34,3 +34,7 @@ jobs:
 
       - name: Type check
         run: uv run mypy
+
+      # Tests marked `model` need the 2.2 GB TinyLlama weights and are skipped here.
+      - name: Test
+        run: uv run pytest
