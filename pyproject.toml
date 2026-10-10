@@ -1,0 +1,68 @@
+[project]
+name = "tinyserve"
+version = "0.1.0"
+description = "A small LLM inference server with a paged KV cache and continuous batching"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Priyanshu" }]
+requires-python = ">=3.11,<3.14"
+dependencies = []
+
+# torch is installed through one of these extras so CI can use the small CPU wheel
+# while GPU machines get the CUDA build. Pick exactly one.
+[project.optional-dependencies]
+cpu = ["torch==2.14.0"]
+cu126 = ["torch==2.14.0"]
+
+[dependency-groups]
+dev = [
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "ruff==0.16.9",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tinyserve"]
+
+[tool.uv]
+# Only resolve releases older than this date; bump it deliberately when upgrading dependencies.
+exclude-newer = "2026-09-26T00:00:00Z"
+conflicts = [[{ extra = "cpu" }, { extra = "cu126" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
