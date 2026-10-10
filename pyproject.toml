@@ -7,7 +7,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Priyanshu" }]
 requires-python = ">=3.11,<3.14"
-dependencies = []
+dependencies = [
+    "huggingface-hub>=1.0",
+    "safetensors>=0.6",
+    "tokenizers>=0.22",
+]
 
 # torch is installed through one of these extras so CI can use the small CPU wheel
 # while GPU machines get the CUDA build. Pick exactly one.
@@ -20,6 +24,7 @@ dev = [
     "mypy==2.3.1",
     "pytest==9.1.1",
     "ruff==0.16.9",
+    "transformers==5.17.0",
 ]
 
 [build-system]
