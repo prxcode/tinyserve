@@ -55,3 +55,17 @@ while GPU machines get CUDA. The cutoff avoids picking up a release published ho
 **Why.** It runs on both the development GPU (RTX 3050 Ti laptop) and the NVIDIA T4 on AWS
 `g4dn` instances with common driver versions. Newer CUDA builds need newer drivers and bring
 no feature this project uses.
+
+## 6. 16-token blocks and a flat slot layout
+
+**Decision.** KV blocks hold 16 tokens. Cache storage is indexed by flat slot
+(`block * block_size + offset`) rather than as a `[block, offset]` pair.
+
+**Why.** Smaller blocks waste less memory in each sequence's last block, but they make block
+tables longer and allocation more frequent. 16 is the common default. The unfilled tail averages about 8 tokens per
+sequence whatever its length, about 176 KiB for TinyLlama.
+Flat slots make writing a batch of new tokens a single `index_copy_` and reading a context a
+single gather.
+
+**Cost.** Block size is not tuned for this workload yet. It is a parameter, so it can be
+measured once the benchmark exists.
