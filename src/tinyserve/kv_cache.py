@@ -31,6 +31,12 @@ class KVCache:
         per_token = 2 * config.num_layers * config.num_kv_heads * config.head_dim * dtype.itemsize
         return per_token * block_size
 
+    @classmethod
+    def blocks_that_fit(
+        cls, budget_bytes: int, config: LlamaConfig, block_size: int, dtype: torch.dtype
+    ) -> int:
+        return max(0, budget_bytes // cls.bytes_per_block(config, block_size, dtype))
+
     def write(self, layer: int, slots: Tensor, keys: Tensor, values: Tensor) -> None:
         """Store [num_tokens, kv_heads, head_dim] keys and values at the given slots."""
         self.keys[layer].index_copy_(0, slots, keys)

@@ -95,3 +95,10 @@ def test_allocated_memory_matches_estimate(tiny_config: LlamaConfig, cache: KVCa
     allocated = cache.keys.nbytes + cache.values.nbytes
 
     assert allocated == 16 * KVCache.bytes_per_block(tiny_config, BLOCK_SIZE, torch.float32)
+
+
+def test_blocks_that_fit_rounds_down(tiny_config: LlamaConfig) -> None:
+    per_block = KVCache.bytes_per_block(tiny_config, BLOCK_SIZE, torch.float16)
+
+    assert KVCache.blocks_that_fit(10 * per_block - 1, tiny_config, BLOCK_SIZE, torch.float16) == 9
+    assert KVCache.blocks_that_fit(-5, tiny_config, BLOCK_SIZE, torch.float16) == 0
