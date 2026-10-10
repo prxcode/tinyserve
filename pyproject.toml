@@ -72,4 +72,5 @@ warn_return_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
+markers = ["model: needs the downloaded TinyLlama weights; skipped when they are missing"]
