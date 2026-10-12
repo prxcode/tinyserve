@@ -11,6 +11,7 @@ import pytest
 import torch
 import transformers
 
+from tinyserve.detokenizer import IncrementalDecoder
 from tinyserve.engine import Engine, EngineConfig
 from tinyserve.model.llama import LlamaForCausalLM
 from tinyserve.model.loader import load_model
@@ -51,6 +52,22 @@ def test_tokenizer_round_trip(tokenizer: Tokenizer) -> None:
 
     assert ids[0] == 1  # BOS is added by the tokenizer's post-processor
     assert tokenizer.decode(ids) == PROMPT
+
+
+def test_streaming_decode_keeps_spaces_and_unicode(tokenizer: Tokenizer) -> None:
+    prompt = tokenizer.encode(PROMPT)
+    output = tokenizer.encode("Paris, at 100°C. Naïve café, 日本語!")[1:]  # drop BOS
+    decoder = IncrementalDecoder(tokenizer, prompt)
+
+    streamed = "".join(decoder.push(token_id) for token_id in output)
+
+    # Compare with the continuation as it reads after the prompt; decoding the output alone
+    # would strip the leading space that separates it from the prompt.
+    full = tokenizer.decode(prompt + output)
+    assert streamed == full[len(tokenizer.decode(prompt)) :]
+    assert streamed.startswith(" Paris")
+    # Decoding token by token drops SentencePiece's word-leading spaces.
+    assert "".join(tokenizer.decode([t]) for t in output) != streamed
 
 
 def test_fp32_logits_match_transformers(
