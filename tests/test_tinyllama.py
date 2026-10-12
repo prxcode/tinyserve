@@ -11,8 +11,10 @@ import pytest
 import torch
 import transformers
 
+from tinyserve.engine import Engine, EngineConfig
 from tinyserve.model.llama import LlamaForCausalLM
 from tinyserve.model.loader import load_model
+from tinyserve.sequence import SamplingParams
 from tinyserve.tokenizer import Tokenizer
 
 MODEL_DIR = Path(os.environ.get("TINYSERVE_MODEL_DIR", "models/TinyLlama-1.1B-Chat-v1.0"))
@@ -102,3 +104,31 @@ def test_gpu_load_peaks_at_one_copy_of_the_weights() -> None:
     peak = torch.cuda.max_memory_allocated() - baseline
     # Converting dtype on the GPU used to double the peak (4.2 GB for 2.1 GB of weights).
     assert peak < weights * 1.1
+
+
+def test_engine_matches_full_recompute_on_real_weights(
+    cpu_model: LlamaForCausalLM, tokenizer: Tokenizer
+) -> None:
+    prompts = [tokenizer.encode(text) for text in (PROMPT, "def add(a, b):", "Water boils at")]
+    config = EngineConfig(num_blocks=64, max_model_len=256, max_prefill_tokens=256)
+
+    seqs = Engine(cpu_model, config).generate(prompts, SamplingParams(max_tokens=8))
+
+    with torch.no_grad():
+        for seq, prompt in zip(seqs, prompts, strict=True):
+            ids = torch.tensor([prompt])
+            for _ in range(len(seq.output_ids)):
+                ids = torch.cat([ids, cpu_model(ids)[:, -1].argmax(dim=-1, keepdim=True)], dim=1)
+            assert seq.output_ids == ids[0, len(prompt) :].tolist()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
+def test_gpu_cache_is_sized_to_fit_free_memory(tokenizer: Tokenizer) -> None:
+    torch.cuda.empty_cache()
+    engine = Engine(load_model(MODEL_DIR, "cuda", torch.float16))
+
+    assert engine.cache.num_blocks * engine.config.block_size >= engine.max_model_len
+    # A full-size batch must run after the cache took its share of memory.
+    prompts = [tokenizer.encode(PROMPT)] * engine.config.max_num_seqs
+    seqs = engine.generate(prompts, SamplingParams(max_tokens=4))
+    assert all(len(seq.output_ids) == 4 for seq in seqs)
