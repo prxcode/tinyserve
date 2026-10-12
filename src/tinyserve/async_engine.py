@@ -3,7 +3,7 @@ import contextlib
 import logging
 import queue
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -80,7 +80,9 @@ class AsyncEngine:
         self._wakeup.set()
         self._thread.join(timeout)
 
-    def submit(self, prompt_ids: list[int], params: SamplingParams) -> AsyncIterator[TokenEvent]:
+    def submit(
+        self, prompt_ids: list[int], params: SamplingParams
+    ) -> AsyncGenerator[TokenEvent, None]:
         """Queue a request and return its token stream.
 
         Raises ValueError or OverloadedError right away, before any response has started.
@@ -98,7 +100,7 @@ class AsyncEngine:
         self._send("add", request)
         return self._stream(request)
 
-    async def _stream(self, request: _Request) -> AsyncIterator[TokenEvent]:
+    async def _stream(self, request: _Request) -> AsyncGenerator[TokenEvent, None]:
         finished = False
         try:
             while not finished:
