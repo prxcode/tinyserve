@@ -62,10 +62,39 @@ no feature this project uses.
 (`block * block_size + offset`) rather than as a `[block, offset]` pair.
 
 **Why.** Smaller blocks waste less memory in each sequence's last block, but they make block
-tables longer and allocation more frequent. 16 is the common default. The unfilled tail averages about 8 tokens per
-sequence whatever its length, about 176 KiB for TinyLlama.
+tables longer and allocation more frequent. 16 is the common default. The unfilled tail
+averages about 8 tokens per sequence whatever its length, about 176 KiB for TinyLlama.
 Flat slots make writing a batch of new tokens a single `index_copy_` and reading a context a
 single gather.
 
 **Cost.** Block size is not tuned for this workload yet. It is a parameter, so it can be
 measured once the benchmark exists.
+
+## 7. Padded batches, with prefill and decode in separate steps
+
+**Decision.** Each step is either a prefill of newly admitted sequences or a decode of all
+running ones, never a mix. Inputs are padded to `[batch, longest]` rather than packed into one
+flat token stream.
+
+**Why.** Padding keeps every tensor in the familiar `[batch, heads, seq, dim]` layout that
+SDPA expects, and makes the attention mask a single comparison of positions. Decode batches,
+which are most steps, have one token per sequence and so no padding at all.
+
+**Cost.** Mixed-length prefills waste compute on padding. The scheduler budgets padded tokens
+so the waste is bounded, but it is not removed. A long prefill also pauses every running
+decode for one step. Chunked prefill or a variable-length attention kernel would fix both,
+at the cost of a more complex attention path.
+
+## 8. Size the KV cache by profiling, not by a fixed fraction
+
+**Decision.** At startup the engine runs the largest possible prefill and decode against a
+throwaway cache, measures peak activation memory, and gives the rest of free GPU memory
+(times `gpu_memory_fraction`) to KV blocks.
+
+**Why.** A fixed split either wastes memory or runs out of it on the first large batch. Peak
+activations depend on `max_prefill_tokens`, `max_num_seqs`, the attention kernel and the
+model. Measuring them is more reliable than modelling them.
+
+**Cost.** About a second and a half of extra startup time. The probe only covers batch shapes
+the scheduler can produce, so changing scheduler limits means the cache is re-profiled on
+the next start.
