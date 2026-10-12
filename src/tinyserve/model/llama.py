@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from tinyserve.kv_cache import PagedBatch
 from tinyserve.model.config import LlamaConfig
 
 
@@ -36,8 +37,9 @@ def apply_rotary(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
 
 
 class Attention(nn.Module):
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(self, config: LlamaConfig, layer_idx: int) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.num_heads = config.num_heads
         self.num_kv_heads = config.num_kv_heads
         self.head_dim = config.head_dim
@@ -47,7 +49,7 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(hidden, self.num_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, hidden, bias=False)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    def forward(self, x: Tensor, cos: Tensor, sin: Tensor, paged: PagedBatch | None) -> Tensor:
         batch, seq_len, _ = x.shape
         q = self.q_proj(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(batch, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -56,7 +58,12 @@ class Attention(nn.Module):
         q = apply_rotary(q, cos, sin)
         k = apply_rotary(k, cos, sin)
 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+        if paged is None:
+            # No cache: plain causal attention over the given tokens. Used as the reference.
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+        else:
+            k, v = paged.update(self.layer_idx, k, v)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=paged.mask, enable_gqa=True)
         return self.o_proj(out.transpose(1, 2).reshape(batch, seq_len, -1))
 
 
@@ -72,15 +79,15 @@ class MLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(self, config: LlamaConfig, layer_idx: int) -> None:
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.self_attn = Attention(config)
+        self.self_attn = Attention(config, layer_idx)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = MLP(config)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), cos, sin)
+    def forward(self, x: Tensor, cos: Tensor, sin: Tensor, paged: PagedBatch | None) -> Tensor:
+        x = x + self.self_attn(self.input_layernorm(x), cos, sin, paged)
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
@@ -89,16 +96,18 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList(DecoderLayer(config) for _ in range(config.num_layers))
+        self.layers = nn.ModuleList(DecoderLayer(config, i) for i in range(config.num_layers))
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
-    def forward(self, input_ids: Tensor, positions: Tensor) -> Tensor:
+    def forward(
+        self, input_ids: Tensor, positions: Tensor, paged: PagedBatch | None = None
+    ) -> Tensor:
         x = self.embed_tokens(input_ids)
         cos, sin = rotary_cos_sin(positions, self.config.head_dim, self.config.rope_theta, x.dtype)
         # Add a head axis so cos/sin broadcast over [batch, heads, seq, head_dim].
         cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
         for layer in self.layers:
-            x = layer(x, cos, sin)
+            x = layer(x, cos, sin, paged)
         return self.norm(x)
 
 
