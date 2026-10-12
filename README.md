@@ -6,8 +6,9 @@ A small LLM inference server written from the model up: a plain PyTorch Llama im
 paged KV cache, a continuous-batching scheduler and a streaming HTTP API. It serves
 [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) on a single GPU.
 
-> **Status: early development.** The engine runs continuous batching over a paged KV cache and
-> is tested against a full-recompute reference, but there is no HTTP server yet. The roadmap below tracks what is implemented;
+> **Status: early development.** The server streams generations from a continuous-batching
+> engine over a paged KV cache. Metrics, benchmarks, quantization and deployment are not done
+> yet. Nothing unchecked in the roadmap should be assumed to work. The roadmap below tracks what is implemented;
 > nothing unchecked should be assumed to work.
 
 ## Why
@@ -31,7 +32,7 @@ behind the main choices is in [docs/decisions.md](docs/decisions.md).
 - [x] Llama forward pass with logits checked against Hugging Face `transformers`
 - [x] Paged KV cache: block allocator, block tables and slot storage
 - [x] Scheduler with continuous batching and preemption
-- [ ] Streaming HTTP API with backpressure and cancellation
+- [x] Streaming HTTP API with backpressure and cancellation
 - [ ] Prometheus metrics and a reproducible load benchmark
 - [ ] Int8 weight-only quantization with a perplexity evaluation
 - [ ] Docker image and an AWS EC2 deployment guide
@@ -67,6 +68,40 @@ uv run pytest
 Tests that need the real weights skip themselves when the weights are missing. See
 [docs/testing.md](docs/testing.md) for what each suite covers.
 
+## Usage
+
+```bash
+uv run python -m tinyserve.server              # GPU if available, http://127.0.0.1:8000
+uv run python -m tinyserve.server --help       # scheduler and cache limits
+```
+
+The KV cache is sized automatically on GPU. On CPU, pass `--num-blocks`.
+
+```bash
+curl -N http://127.0.0.1:8000/v1/generate \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "Water boils at", "max_tokens": 20}'
+```
+
+```
+data: {"text": " "}
+data: {"text": "2"}
+...
+data: {"text": "°"}
+data: {"text": "F"}
+...
+data: {"finish_reason": "length", "usage": {"prompt_tokens": 5, "completion_tokens": 20}}
+data: [DONE]
+```
+
+Request fields: `prompt` (required), `max_tokens` (default 128), `temperature` (0 to 2,
+default 0 = greedy), `top_p` (above 0 and at most 1, default 1) and `stream` (default true).
+With `"stream": false` the response is one JSON object with `text`, `finish_reason` and
+`usage`. `GET /health` reports queue sizes and free cache blocks. Error codes are listed in
+[docs/architecture.md](docs/architecture.md#failure-handling).
+
+The prompt is sent to the model as raw text. TinyLlama-Chat's chat template is not applied.
+
 ## Limitations
 
 - Single GPU, single model per process.
@@ -76,8 +111,10 @@ Tests that need the real weights skip themselves when the weights are missing. S
   prefills waste compute on padding. The scheduler's token budget counts that padding.
 - In fp16, greedy output can depend on which other requests share the batch (see
   [architecture.md](docs/architecture.md#engine)).
-- No authentication. Do not expose the server to the public internet without a proxy in front
-  of it (see [SECURITY.md](SECURITY.md)).
+- No authentication, and the server binds to `127.0.0.1` by default. Do not expose it to the
+  public internet without a proxy in front of it (see [SECURITY.md](SECURITY.md)).
+- No chat template: prompts are completed as raw text.
+- A non-streaming request keeps running after its client disconnects, up to `max_tokens`.
 
 ## Contributing
 

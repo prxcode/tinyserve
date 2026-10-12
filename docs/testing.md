@@ -18,13 +18,20 @@ uv run pytest -m "not model"   # skip tests that need downloaded weights
 | `test_scheduler.py` | nothing | yes | Prefill priority, FCFS without skipping, padded prefill budget, decode headroom on admission, preemption of the newest sequence and its reset state, aborts, impossible requests, and a 60-request randomized workload that must finish with preemptions and no leaked blocks |
 | `test_paged_attention.py` | nothing | yes | Paged prefill and decode over interleaved blocks give the same logits as recomputing without a cache (float64), and padding never writes to the cache |
 | `test_engine.py` | nothing | yes | Batched greedy output is token-identical to a full-recompute reference: all at once, with requests joining mid-run, under heavy preemption, and after aborts. Also EOS and `max_tokens` handling, seeded sampling and prompt validation |
+| `test_detokenizer.py` | nothing | yes | Streamed text deltas join to the full decode, including characters split across byte tokens (`°`, CJK, emoji). A guard test proves naive per-token decoding really breaks on the same input |
+| `test_async_engine.py` | nothing | yes | Concurrent requests through the engine thread match the synchronous engine. Closing a stream aborts the request and frees its blocks, `max_pending` is enforced and recovers, invalid requests fail before queueing, a failed batch reports an error and the engine recovers, a crashed engine thread fails requests instead of hanging, and `stop()` ends in-flight streams |
+| `test_server.py` | nothing | yes | Against a real uvicorn server on a local socket: SSE format and content, JSON mode, 12 concurrent clients each getting their own correct text, 422 and 400 cases, 503 with `Retry-After` under a held engine, a client hanging up mid-stream aborting its request, error events and `/health` degrading after repeated failures |
 | `test_sampling.py` | nothing | yes | Greedy, nucleus cut-off, empirical distribution, per-row settings, seeded reproducibility |
-| `test_tinyllama.py` | downloaded weights | no | fp32 logit parity with `transformers` on the real model, a greedy sanity check, bounded fp16 GPU drift, GPU load peak memory not exceeding one copy of the weights, the engine matching full recompute on the real weights, and the profiled GPU cache surviving a full `max_num_seqs` batch |
+| `test_tinyllama.py` | downloaded weights | no | fp32 logit parity with `transformers` on the real model, a greedy sanity check, bounded fp16 GPU drift, GPU load peak memory not exceeding one copy of the weights, the engine matching full recompute on the real weights, the profiled GPU cache surviving a full `max_num_seqs` batch, and streaming detokenization keeping SentencePiece spaces and multi-byte characters |
 
 The parity tests are what catch real bugs. Flipping the sign in the RoPE rotation makes the
 loader parity test fail, and changing the attention mask from `<=` to `<` makes the paged
 attention test fail. The real-model tests confirm that the same code holds at
 full size and in fp16.
+
+The thread and socket tests use explicit synchronization (a gate on the forward pass, polling
+with a deadline) rather than sleeps that hope for the right timing. Before they were committed,
+the async engine suite was run 25 times and the server suite 10 times without a failure.
 
 ## Running the real-model tests
 
