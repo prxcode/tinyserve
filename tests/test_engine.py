@@ -160,6 +160,34 @@ def test_seeded_sampling_is_reproducible(model: LlamaForCausalLM, prompts: list[
     assert [s.output_ids for s in first] == [s.output_ids for s in second]
 
 
+def test_failed_forward_fails_only_its_batch(
+    model: LlamaForCausalLM, prompts: list[list[int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = make_engine(model)
+    params = SamplingParams(max_tokens=6)
+    running = [engine.add_request(p, params) for p in prompts[:2]]
+    engine.step()  # prefill the first two
+
+    late = engine.add_request(prompts[2], params)
+    original = engine.model.model.forward
+
+    def fail_once(*args: object, **kwargs: object) -> torch.Tensor:
+        monkeypatch.setattr(engine.model.model, "forward", original)
+        raise RuntimeError("CUDA out of memory (simulated)")
+
+    monkeypatch.setattr(engine.model.model, "forward", fail_once)
+    outputs = engine.step()  # the prefill of `late` fails
+
+    assert [(o.seq, o.token_id, o.finish_reason) for o in outputs] == [
+        (late, None, FinishReason.ERROR)
+    ]
+    while engine.has_unfinished():
+        engine.step()
+    for seq, prompt in zip(running, prompts, strict=False):
+        assert seq.output_ids == reference_greedy(model, prompt, 6)
+    assert engine.scheduler.blocks.num_free_blocks == engine.scheduler.blocks.num_blocks
+
+
 @pytest.mark.parametrize("prompt", [[], [-1, 5], [5, 10_000]], ids=["empty", "negative", "too-big"])
 def test_rejects_invalid_prompts(model: LlamaForCausalLM, prompt: list[int]) -> None:
     engine = make_engine(model)

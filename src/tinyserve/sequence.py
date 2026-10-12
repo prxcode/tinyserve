@@ -27,6 +27,7 @@ class FinishReason(StrEnum):
     STOP = "stop"  # end-of-sequence token
     LENGTH = "length"  # hit max_tokens
     ABORT = "abort"  # cancelled by the caller
+    ERROR = "error"  # the forward pass for its batch failed
 
 
 @dataclass(eq=False)

@@ -39,15 +39,19 @@ class Scheduler:
         self.running: list[Sequence] = []
         self.num_preemptions = 0
 
-    def add(self, seq: Sequence) -> None:
-        total = len(seq.prompt_ids) + seq.params.max_tokens
+    def check(self, prompt_len: int, max_tokens: int) -> None:
+        """Raise ValueError for a request that could never run. Only reads fixed limits."""
+        total = prompt_len + max_tokens
         if total > self.max_model_len:
             raise ValueError(
-                f"prompt ({len(seq.prompt_ids)}) + max_tokens ({seq.params.max_tokens}) "
+                f"prompt ({prompt_len}) + max_tokens ({max_tokens}) "
                 f"exceeds the model limit of {self.max_model_len} tokens"
             )
         if self.blocks.blocks_for(total) > self.blocks.num_blocks:
             raise ValueError(f"request needs {total} tokens, more than the whole KV cache")
+
+    def add(self, seq: Sequence) -> None:
+        self.check(len(seq.prompt_ids), seq.params.max_tokens)
         self.waiting.append(seq)
 
     def has_unfinished(self) -> bool:

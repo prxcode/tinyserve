@@ -1,4 +1,5 @@
 import itertools
+import logging
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +11,8 @@ from tinyserve.model.llama import LlamaForCausalLM
 from tinyserve.sampling import sample
 from tinyserve.scheduler import Scheduler
 from tinyserve.sequence import FinishReason, SamplingParams, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,7 @@ class EngineConfig:
 @dataclass
 class StepOutput:
     seq: Sequence
-    token_id: int
+    token_id: int | None  # None when the step failed for this sequence
     finish_reason: FinishReason | None
 
 
@@ -60,12 +63,18 @@ class Engine:
             self.generator = torch.Generator(self.device).manual_seed(config.seed)
         self._next_id = itertools.count()
 
-    def add_request(self, prompt_ids: list[int], params: SamplingParams) -> Sequence:
+    def validate_request(self, prompt_ids: list[int], params: SamplingParams) -> None:
+        """Raise ValueError for a request that can never run. Reads only fixed limits, so
+        the server may call it from outside the engine thread."""
         if not prompt_ids:
             raise ValueError("prompt must contain at least one token")
         # An out-of-range id would trigger a device-side assert that kills the CUDA context.
         if min(prompt_ids) < 0 or max(prompt_ids) >= self.model.config.vocab_size:
             raise ValueError("prompt contains token ids outside the vocabulary")
+        self.scheduler.check(len(prompt_ids), params.max_tokens)
+
+    def add_request(self, prompt_ids: list[int], params: SamplingParams) -> Sequence:
+        self.validate_request(prompt_ids, params)
         seq = Sequence(next(self._next_id), list(prompt_ids), params)
         self.scheduler.add(seq)
         return seq
@@ -83,13 +92,15 @@ class Engine:
             return []
         seqs = batch.sequences
 
-        input_ids, positions, paged, last_index = self._prepare(seqs)
-        hidden = self.model.model(input_ids, positions, paged)
-        # Only the last new token of each sequence needs logits; skip the rest of the vocab matmul.
-        logits = self.model.lm_head(hidden[torch.arange(len(seqs), device=self.device), last_index])
-        temperatures = torch.tensor([s.params.temperature for s in seqs], device=self.device)
-        top_ps = torch.tensor([s.params.top_p for s in seqs], device=self.device)
-        token_ids = sample(logits, temperatures, top_ps, self.generator).tolist()
+        try:
+            token_ids = self._forward(seqs)
+        except Exception:
+            # Fail only this batch. Its sequences give back their blocks, and every other
+            # request keeps running on the next step.
+            logger.exception("forward pass failed for a batch of %d sequences", len(seqs))
+            for seq in seqs:
+                self.scheduler.finish(seq, FinishReason.ERROR)
+            return [StepOutput(seq, None, FinishReason.ERROR) for seq in seqs]
 
         outputs = []
         for seq, token_id in zip(seqs, token_ids, strict=True):
@@ -107,6 +118,16 @@ class Engine:
         while self.has_unfinished():
             self.step()
         return seqs
+
+    def _forward(self, seqs: list[Sequence]) -> list[int]:
+        input_ids, positions, paged, last_index = self._prepare(seqs)
+        hidden = self.model.model(input_ids, positions, paged)
+        # Only the last new token of each sequence needs logits; skip the rest of the vocab matmul.
+        logits = self.model.lm_head(hidden[torch.arange(len(seqs), device=self.device), last_index])
+        temperatures = torch.tensor([s.params.temperature for s in seqs], device=self.device)
+        top_ps = torch.tensor([s.params.top_p for s in seqs], device=self.device)
+        token_ids: list[int] = sample(logits, temperatures, top_ps, self.generator).tolist()
+        return token_ids
 
     def _finish_reason(self, seq: Sequence, token_id: int) -> FinishReason | None:
         if token_id == self.eos_token_id:
