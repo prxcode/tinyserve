@@ -98,3 +98,31 @@ model. Measuring them is more reliable than modelling them.
 **Cost.** About a second and a half of extra startup time. The probe only covers batch shapes
 the scheduler can produce, so changing scheduler limits means the cache is re-profiled on
 the next start.
+
+## 9. One engine thread, driven by a command queue
+
+**Decision.** The engine and scheduler are touched only from one dedicated thread. The
+asyncio side sends `add` and `abort` commands through a queue, and receives tokens through
+`call_soon_threadsafe`.
+
+**Why.** The forward pass blocks for milliseconds and cannot run on the event loop. A single
+owner thread means the scheduler, block manager and cache need no locks, and every state
+change happens between steps, never in the middle of one. The alternative, calling into the
+engine from request handlers under a lock, would hold that lock for a whole forward pass.
+
+**Cost.** Commands wait for the current step to finish before they take effect, so a
+cancelled request can still be computed for one more step.
+
+## 10. Validate before streaming
+
+**Decision.** `submit()` validates the request and checks the in-flight limit synchronously,
+and only then returns the token stream.
+
+**Why.** Once a streaming response has sent its 200 status, the server can no longer report an
+error through the HTTP status. Checking first means a bad or rejected request always gets a
+proper 400 or 503.
+
+**Cost.** Validation runs on the event loop thread while the engine thread is running, so it
+may only read limits that never change after startup (model length, vocabulary size, cache
+size). Anything that depends on live scheduler state, such as free blocks, cannot be checked
+there.
