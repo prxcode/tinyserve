@@ -14,8 +14,10 @@ status is updated in the same commit that lands the component.
 | Paged KV cache (allocator, block tables, storage) | `tinyserve.block_manager`, `tinyserve.kv_cache` | implemented |
 | Scheduler | `tinyserve.scheduler` | implemented |
 | Sampling (temperature, top-p) | `tinyserve.sampling` | implemented |
-| Engine (step loop, cache sizing) | `tinyserve.engine` | implemented, synchronous; the server thread is not built yet |
-| HTTP server | `tinyserve.server` | planned |
+| Engine (step loop, cache sizing) | `tinyserve.engine` | implemented |
+| Engine thread and async bridge | `tinyserve.async_engine` | implemented |
+| Streaming detokenizer | `tinyserve.detokenizer` | implemented |
+| HTTP server | `tinyserve.server` | implemented |
 | Metrics | `tinyserve.metrics` | planned |
 | Int8 weight quantization | `tinyserve.model.quant` | planned |
 
@@ -29,15 +31,18 @@ client ──HTTP──▶ FastAPI handler ──submit──▶ engine thread
                                                 │   append tokens, free finished sequences
 ```
 
-1. The handler validates the request, tokenizes the prompt and rejects it early if
-   `prompt_tokens + max_tokens` can never fit in the cache.
-2. The request goes into the scheduler's waiting queue. If that queue is full the server
-   returns 503 instead of queueing unbounded work.
+1. The handler tokenizes the prompt and validates the request on the event loop thread. It
+   returns 400 if `prompt_tokens + max_tokens` can never fit in the model context or the
+   cache, and 503 if too many requests are already in flight. Both happen before the
+   response starts, so a client never gets a 200 that fails right away.
+2. The request is handed to the engine thread through a command queue and lands in the
+   scheduler's waiting queue.
 3. On each engine step the scheduler picks a batch. New requests get their prompt processed
    (prefill); running requests produce one token each (decode).
-4. Each generated token is pushed to the request's asyncio queue and streamed to the client.
-5. When a sequence hits EOS, `max_tokens`, or the client disconnects, its cache blocks are
-   returned to the free pool on the next step.
+4. Each generated token id is pushed to the request's asyncio queue. The handler turns it into
+   text and streams it as a server-sent event.
+5. When a sequence hits EOS or `max_tokens`, or the client disconnects, its cache blocks are
+   returned to the free pool.
 
 ## Model
 
@@ -107,8 +112,10 @@ That 1 GiB leaves nothing for activations, so the engine sizes the cache by prof
 the largest prefill (`max_prefill_tokens` in one sequence) and the largest decode
 (`max_num_seqs` sequences at `max_model_len` context) against a throwaway cache. It records
 peak activation memory, frees the probe, and gives `free × gpu_memory_fraction − activations`
-to KV blocks. With default settings on the development GPU this came to 1246 blocks
-(19,936 tokens, 428 MiB), with about 300 MiB left free.
+to KV blocks. With default settings on the development GPU, two runs gave 1246 blocks
+(19,936 tokens) and 2345 blocks (37,520 tokens). The budget is taken from currently free
+memory, and on a laptop the desktop and other applications use a varying share of VRAM. On a
+dedicated server GPU it would be stable.
 
 ## Scheduler
 
@@ -156,25 +163,54 @@ alone, and the tests rely on that. In fp16 on GPU, batch size and padding change
 run and the order their sums are accumulated in, so greedy outputs can diverge at near-ties.
 In one run of six prompts, five matched exactly and one diverged at token 25.
 
-## Server threading (planned)
+## Engine thread and async bridge
 
-The engine runs in one dedicated thread. The model forward pass blocks, but PyTorch releases
-the GIL inside kernels, so the asyncio event loop that serves HTTP stays responsive.
+`AsyncEngine` runs the engine on one dedicated thread. The forward pass blocks, but PyTorch
+releases the GIL inside its kernels, so the asyncio event loop that serves HTTP stays
+responsive while the GPU works.
 
-- Requests go in through a thread-safe queue that the engine drains at the start of each step.
-- Tokens come out via `loop.call_soon_threadsafe` into a per-request `asyncio.Queue`.
-- Cancellation sets a flag that the engine checks before scheduling. The sequence is dropped
-  and its blocks are freed.
+- **Only the engine thread touches the engine.** The event loop sends it `add` and `abort`
+  commands through a `queue.SimpleQueue`, which it drains before every step. The engine and
+  scheduler therefore need no locks.
+- **Tokens come back** through `loop.call_soon_threadsafe` into a per-request `asyncio.Queue`.
+- **Idle waiting.** With no work, the thread sleeps on a `threading.Event` that every command
+  sets. It clears the event after waking, which can drop a wakeup, but the next loop drains
+  the command queue anyway, so no command is missed.
+- **`submit()` is synchronous.** Validation and the in-flight limit are checked before
+  anything is queued, which is what lets the server answer 400 or 503 instead of a broken
+  stream. The in-flight count is the only state shared across threads, and it has a lock.
+- **Cancellation.** Each request's token stream is an async generator. If it is closed before
+  the final event, its `finally` block sends `abort`, and the engine finishes the sequence and
+  frees its blocks on the next loop. Starlette cancels the response generator when the client
+  disconnects, so this covers dropped connections.
+
+### Streaming detokenization
+
+Turning one token at a time into text is wrong in two ways:
+- SentencePiece drops the leading space of a word decoded on its own (`"▁Paris"` alone decodes
+  to `"Paris"`).
+- A multi-byte character can be split across byte tokens and decode to `U+FFFD`.
+
+`IncrementalDecoder` re-decodes a window of up to five earlier tokens plus the new one and
+emits only the text the window adds. Output ending in `U+FFFD` is held back until the
+character is complete. The tests check this against both a byte-level BPE and TinyLlama's
+SentencePiece tokenizer.
 
 ## Failure handling
 
 | Situation | Behavior |
 |---|---|
-| Prompt plus `max_tokens` larger than the model context or the whole cache | 400 at admission |
-| Waiting queue full | 503 with `Retry-After` |
-| Client disconnects mid-stream | Request aborted, blocks freed on the next step |
+| Malformed body (missing prompt, `temperature` out of range, ...) | 422 from schema validation |
+| Prompt plus `max_tokens` larger than the model context or the whole cache, or a prompt with token ids outside the vocabulary | 400 before anything is queued |
+| More than `max_pending` requests in flight | 503 with `Retry-After: 1` |
+| Client disconnects mid-stream | Request aborted and its blocks freed on the engine's next loop |
 | Cache exhausted during decode | Preemption and recompute, invisible to the client except for latency |
-| Exception inside a forward pass | Requests in that batch fail with an error event and their blocks are freed; the loop keeps running and the error is counted in metrics |
+| Exception inside a forward pass | Only that batch's requests end with `finish_reason: "error"` (SSE) or 500 (JSON), and their blocks are freed. Everything else keeps running |
+| Repeated failed batches | `/health` returns 503 after 3 consecutive failed steps and recovers after a successful one. One transient OOM does not flip it, but a dead CUDA context does |
+| Bug that crashes the engine thread | Every in-flight request ends with an error instead of hanging, new requests get 503, and `/health` reports unhealthy |
+
+Non-streaming requests are not cancelled when the client disconnects. They run until EOS or
+`max_tokens`, which bounds the wasted work.
 
 ## Metrics
 
