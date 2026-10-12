@@ -8,9 +8,11 @@ license-files = ["LICENSE"]
 authors = [{ name = "Priyanshu" }]
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "fastapi>=0.115",
     "huggingface-hub>=1.0",
     "safetensors>=0.6",
     "tokenizers>=0.22",
+    "uvicorn>=0.30",
 ]
 
 # torch is installed through one of these extras so CI can use the small CPU wheel
@@ -21,6 +23,7 @@ cu126 = ["torch==2.14.0"]
 
 [dependency-groups]
 dev = [
+    "httpx==0.28.1",
     "mypy==2.3.1",
     "pytest==9.1.1",
     "ruff==0.16.9",
