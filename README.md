@@ -6,8 +6,8 @@ A small LLM inference server written from the model up: a plain PyTorch Llama im
 paged KV cache, a continuous-batching scheduler and a streaming HTTP API. It serves
 [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) on a single GPU.
 
-> **Status: early development.** The model runs and matches the reference implementation, and
-> the paged KV cache exists, but attention does not use it yet and there is no scheduler or server. The roadmap below tracks what is implemented;
+> **Status: early development.** The engine runs continuous batching over a paged KV cache and
+> is tested against a full-recompute reference, but there is no HTTP server yet. The roadmap below tracks what is implemented;
 > nothing unchecked should be assumed to work.
 
 ## Why
@@ -30,7 +30,7 @@ behind the main choices is in [docs/decisions.md](docs/decisions.md).
 - [x] Project scaffold, tooling and CI
 - [x] Llama forward pass with logits checked against Hugging Face `transformers`
 - [x] Paged KV cache: block allocator, block tables and slot storage
-- [ ] Scheduler with continuous batching and preemption
+- [x] Scheduler with continuous batching and preemption
 - [ ] Streaming HTTP API with backpressure and cancellation
 - [ ] Prometheus metrics and a reproducible load benchmark
 - [ ] Int8 weight-only quantization with a perplexity evaluation
@@ -72,6 +72,10 @@ Tests that need the real weights skip themselves when the weights are missing. S
 - Single GPU, single model per process.
 - Attention gathers cache blocks and calls PyTorch SDPA instead of using a fused paged-attention
   kernel, so it trades speed for code that is easy to read and verify.
+- Prefill inputs are padded to the longest prompt in the batch, not packed, so mixed-length
+  prefills waste compute on padding. The scheduler's token budget counts that padding.
+- In fp16, greedy output can depend on which other requests share the batch (see
+  [architecture.md](docs/architecture.md#engine)).
 - No authentication. Do not expose the server to the public internet without a proxy in front
   of it (see [SECURITY.md](SECURITY.md)).
 
