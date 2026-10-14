@@ -14,6 +14,7 @@ import json
 import math
 import platform
 import random
+import shutil
 import statistics
 import subprocess
 import time
@@ -40,6 +41,12 @@ class RequestResult:
     token_gaps: list[float] = field(default_factory=list)  # seconds between streamed chunks
 
 
+GPU_FIELDS = (
+    "name,pstate,clocks.sm,clocks.max.sm,clocks.mem,clocks.max.mem,"
+    "power.draw,utilization.gpu,memory.used,memory.total"
+)
+
+
 @dataclass
 class RunSummary:
     concurrency: int
@@ -52,6 +59,51 @@ class RunSummary:
     ttft_ms: dict[str, float]
     inter_token_ms: dict[str, float]
     latency_ms: dict[str, float]
+    gpu_during_run: dict[str, Any] | None
+
+
+def nvidia_smi(*args: str) -> str | None:
+    # Windows installs nvidia-smi in System32, which is not always on PATH for every shell.
+    exe = shutil.which("nvidia-smi") or shutil.which(r"C:\Windows\System32\nvidia-smi.exe")
+    if exe is None:
+        return None
+    try:
+        return subprocess.run([exe, *args], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def gpu_state() -> dict[str, Any] | None:
+    """Snapshot of the local GPU, so throttled or shared runs show up in the results."""
+    gpus = nvidia_smi(f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits")
+    apps = nvidia_smi("--query-compute-apps=pid,process_name", "--format=csv,noheader")
+    if gpus is None or apps is None:
+        return None
+    state: dict[str, Any] = dict(
+        zip(
+            GPU_FIELDS.split(","), (v.strip() for v in gpus.splitlines()[0].split(",")), strict=True
+        )
+    )
+    state["compute_apps"] = [line.strip() for line in apps.splitlines() if line.strip()]
+    return state
+
+
+def gpu_warnings(state: dict[str, Any] | None) -> list[str]:
+    """Reasons a run's numbers cannot be trusted, from a snapshot taken under load."""
+    if state is None:
+        return []
+    warnings = []
+    if state["pstate"] != "P0":
+        warnings.append(f"GPU in power state {state['pstate']} under load, not P0")
+    if float(state["clocks.mem"]) < 0.9 * float(state["clocks.max.mem"]):
+        warnings.append(
+            f"memory clock {state['clocks.mem']} of {state['clocks.max.mem']} MHz "
+            "(on battery or a power-saving plan?)"
+        )
+    others = [app for app in state["compute_apps"] if "python" not in app.lower()]
+    if others:
+        warnings.append(f"other processes are using the GPU: {others}")
+    return warnings
 
 
 def make_prompt(rng: random.Random, num_words: int) -> str:
@@ -130,9 +182,16 @@ async def run(
                 prompt = queue.get_nowait()
                 results.append(await send(client, prompt, output_tokens))
 
+        async def sample_gpu() -> dict[str, Any] | None:
+            # Sample once the run is under way; an idle GPU always drops its clocks.
+            await asyncio.sleep(2)
+            return await asyncio.to_thread(gpu_state)
+
         start = time.perf_counter()
+        sampler = asyncio.create_task(sample_gpu())
         await asyncio.gather(*(worker() for _ in range(concurrency)))
         duration = time.perf_counter() - start
+        gpu = await sampler
 
     total_output = sum(r.output_tokens for r in results)
     return RunSummary(
@@ -146,6 +205,7 @@ async def run(
         ttft_ms=percentiles([r.ttft for r in results]),
         inter_token_ms=percentiles([gap for r in results for gap in r.token_gaps]),
         latency_ms=percentiles([r.latency for r in results]),
+        gpu_during_run=gpu,
     )
 
 
@@ -189,6 +249,8 @@ async def main() -> None:
             f"TTFT p50 {ttft['p50']:8.1f} ms  p99 {ttft['p99']:8.1f} ms  "
             f"ITL p50 {itl['p50']:6.1f} ms  p99 {itl['p99']:6.1f} ms"
         )
+        for warning in gpu_warnings(summary.gpu_during_run):
+            print(f"  WARNING: {warning}; these numbers do not reflect the hardware")
 
     if args.out:
         record = {
