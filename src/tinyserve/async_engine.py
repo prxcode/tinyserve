@@ -3,11 +3,13 @@ import contextlib
 import logging
 import queue
 import threading
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Literal
 
 from tinyserve.engine import Engine
+from tinyserve.metrics import Metrics
 from tinyserve.sequence import FinishReason, SamplingParams, Sequence
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,18 @@ class AsyncEngine:
         self._pending_lock = threading.Lock()
         self._requests: dict[int, _Request] = {}  # engine thread only
         self._thread = threading.Thread(target=self._run, name="engine", daemon=True)
+
+        self.metrics = Metrics()
+        scheduler = engine.scheduler
+        blocks = scheduler.blocks
+        # Read at scrape time from another thread; len() and int reads are atomic, and a value
+        # that is one step stale is fine for a gauge.
+        self.metrics.watch(
+            running=lambda: len(scheduler.running),
+            waiting=lambda: len(scheduler.waiting),
+            pending=lambda: self._pending,
+            kv_cache_usage=lambda: 1 - blocks.num_free_blocks / blocks.num_blocks,
+        )
 
     @property
     def num_pending(self) -> int:
@@ -136,7 +150,16 @@ class AsyncEngine:
             self._end_all(FinishReason.ABORT)
 
     def _step(self) -> None:
+        preemptions_before = self.engine.scheduler.num_preemptions
+        started = time.perf_counter()
         outputs = self.engine.step()
+        # step() ends by copying sampled tokens to the CPU, so the GPU work is done by now.
+        elapsed = time.perf_counter() - started
+        batch = self.engine.last_batch
+        if batch is not None:
+            self.metrics.observe_step(batch.is_prefill, len(batch.sequences), elapsed)
+        self.metrics.preemptions.inc(self.engine.scheduler.num_preemptions - preemptions_before)
+
         failed = False
         for output in outputs:
             request = self._requests[output.seq.seq_id]

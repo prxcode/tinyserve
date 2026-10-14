@@ -14,12 +14,14 @@ from typing import Any, Protocol
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from tinyserve.async_engine import AsyncEngine, EngineStoppedError, OverloadedError, TokenEvent
 from tinyserve.detokenizer import IncrementalDecoder
 from tinyserve.engine import Engine, EngineConfig
+from tinyserve.metrics import RequestTimer
 from tinyserve.model.loader import load_model
 from tinyserve.sequence import FinishReason, SamplingParams
 from tinyserve.tokenizer import Tokenizer
@@ -38,6 +40,8 @@ class GenerateRequest(BaseModel):
     max_tokens: int = Field(default=128, ge=1)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, gt=0.0, le=1.0)
+    # Keep generating past the end-of-sequence token. Used by benchmarks to fix output length.
+    ignore_eos: bool = False
     stream: bool = True
 
 
@@ -49,25 +53,32 @@ def create_app(engine: AsyncEngine, tokenizer: TextTokenizer) -> FastAPI:
         engine.stop()
 
     app = FastAPI(title="tinyserve", lifespan=lifespan)
+    metrics = engine.metrics
 
     @app.post("/v1/generate", response_model=None)
     async def generate(body: GenerateRequest) -> StreamingResponse | dict[str, Any]:
+        timer = RequestTimer(metrics)
         prompt_ids = tokenizer.encode(body.prompt)
-        params = SamplingParams(body.max_tokens, body.temperature, body.top_p)
+        params = SamplingParams(
+            body.max_tokens, body.temperature, body.top_p, ignore_eos=body.ignore_eos
+        )
         try:
             events = engine.submit(prompt_ids, params)
         except ValueError as exc:
+            metrics.rejected.labels("invalid").inc()
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except (OverloadedError, EngineStoppedError) as exc:
+            metrics.rejected.labels("unavailable").inc()
             raise HTTPException(
                 status_code=503, detail=str(exc), headers={"Retry-After": "1"}
             ) from exc
+        metrics.prompt_tokens.inc(len(prompt_ids))
 
         decoder = IncrementalDecoder(tokenizer, prompt_ids)
         usage = {"prompt_tokens": len(prompt_ids), "completion_tokens": 0}
         if body.stream:
             return StreamingResponse(
-                stream_events(events, decoder, usage),
+                stream_events(events, decoder, usage, timer),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache"},
             )
@@ -76,7 +87,7 @@ def create_app(engine: AsyncEngine, tokenizer: TextTokenizer) -> FastAPI:
         reason = None
         async with aclosing(events):
             async for event in events:
-                pieces.append(decode_event(event, decoder, usage))
+                pieces.append(decode_event(event, decoder, usage, timer))
                 reason = event.finish_reason
         if reason is FinishReason.ERROR:
             raise HTTPException(status_code=500, detail="generation failed")
@@ -98,32 +109,51 @@ def create_app(engine: AsyncEngine, tokenizer: TextTokenizer) -> FastAPI:
         }
         return JSONResponse(body, status_code=200 if healthy else 503)
 
+    @app.get("/metrics")
+    def prometheus_metrics() -> Response:
+        return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
+
     return app
 
 
-def decode_event(event: TokenEvent, decoder: IncrementalDecoder, usage: dict[str, int]) -> str:
-    if event.token_id is None:
-        return ""
-    usage["completion_tokens"] += 1
-    return decoder.push(event.token_id)
+def decode_event(
+    event: TokenEvent, decoder: IncrementalDecoder, usage: dict[str, int], timer: RequestTimer
+) -> str:
+    text = ""
+    if event.token_id is not None:
+        timer.token()
+        usage["completion_tokens"] += 1
+        text = decoder.push(event.token_id)
+    if event.finish_reason is not None:
+        timer.finish(event.finish_reason)
+    return text
 
 
 async def stream_events(
-    events: AsyncGenerator[TokenEvent, None], decoder: IncrementalDecoder, usage: dict[str, int]
+    events: AsyncGenerator[TokenEvent, None],
+    decoder: IncrementalDecoder,
+    usage: dict[str, int],
+    timer: RequestTimer,
 ) -> AsyncIterator[str]:
     # When the client disconnects, Starlette cancels this generator; aclosing then closes
     # the engine stream, which aborts the request and frees its cache blocks.
-    async with aclosing(events):
-        async for event in events:
-            text = decode_event(event, decoder, usage)
-            if text:
-                yield sse({"text": text})
-            if event.finish_reason is not None:
-                final: dict[str, Any] = {"finish_reason": event.finish_reason, "usage": usage}
-                if event.finish_reason is FinishReason.ERROR:
-                    final["error"] = "generation failed"
-                yield sse(final)
-    yield "data: [DONE]\n\n"
+    finished = False
+    try:
+        async with aclosing(events):
+            async for event in events:
+                text = decode_event(event, decoder, usage, timer)
+                if text:
+                    yield sse({"text": text})
+                if event.finish_reason is not None:
+                    finished = True
+                    final: dict[str, Any] = {"finish_reason": event.finish_reason, "usage": usage}
+                    if event.finish_reason is FinishReason.ERROR:
+                        final["error"] = "generation failed"
+                    yield sse(final)
+        yield "data: [DONE]\n\n"
+    finally:
+        if not finished:
+            timer.finish(FinishReason.ABORT)  # the client went away before the final event
 
 
 def sse(payload: dict[str, Any]) -> str:

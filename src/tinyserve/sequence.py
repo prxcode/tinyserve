@@ -7,6 +7,7 @@ class SamplingParams:
     max_tokens: int = 128
     temperature: float = 0.0
     top_p: float = 1.0
+    ignore_eos: bool = False
 
     def __post_init__(self) -> None:
         if self.max_tokens < 1:

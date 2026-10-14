@@ -11,6 +11,7 @@ import httpx
 import pytest
 import torch
 import uvicorn
+from prometheus_client.parser import text_string_to_metric_families
 
 from tinyserve.async_engine import AsyncEngine
 from tinyserve.engine import Engine, EngineConfig
@@ -263,3 +264,55 @@ def test_health_reports_capacity(server: Server) -> None:
         "free_blocks": 64,
         "total_blocks": 64,
     }
+
+
+def scrape(server: Server) -> dict[str, float]:
+    """Flatten /metrics into {"name{label=value}": number} for easy assertions."""
+    response = httpx.get(f"{server.url}/metrics")
+    assert response.status_code == 200
+    values = {}
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            labels = ",".join(f"{k}={v}" for k, v in sorted(sample.labels.items()))
+            values[f"{sample.name}{{{labels}}}" if labels else sample.name] = sample.value
+    return values
+
+
+def test_metrics_follow_a_streamed_request(server: Server) -> None:
+    body = {"prompt": "hello", "max_tokens": 6, "ignore_eos": True}
+    with httpx.stream("POST", f"{server.url}/v1/generate", json=body, timeout=30) as response:
+        read_events(response)
+
+    metrics = scrape(server)
+    assert metrics["tinyserve_requests_total{finish_reason=length}"] == 1
+    assert metrics["tinyserve_prompt_tokens_total"] == 5
+    assert metrics["tinyserve_generated_tokens_total"] == 6
+    assert metrics["tinyserve_time_to_first_token_seconds_count"] == 1
+    assert metrics["tinyserve_inter_token_latency_seconds_count"] == 5
+    assert metrics["tinyserve_request_latency_seconds_count"] == 1
+    # One prefill step, then one decode step per remaining token.
+    assert metrics["tinyserve_engine_step_seconds_count{kind=prefill}"] == 1
+    assert metrics["tinyserve_engine_step_seconds_count{kind=decode}"] == 5
+    assert metrics["tinyserve_running_requests"] == 0
+    assert metrics["tinyserve_kv_cache_usage_ratio"] == 0
+
+
+def test_metrics_count_rejections_and_aborts(
+    server: Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    httpx.post(f"{server.url}/v1/generate", json={"prompt": "hi", "max_tokens": 1000})
+    original_forward = server.engine.engine.model.model.forward
+
+    def slow_forward(*args: Any, **kwargs: Any) -> torch.Tensor:
+        time.sleep(0.02)
+        return original_forward(*args, **kwargs)
+
+    monkeypatch.setattr(server.engine.engine.model.model, "forward", slow_forward)
+    body = {"prompt": "hi", "max_tokens": 60, "ignore_eos": True}
+    with httpx.stream("POST", f"{server.url}/v1/generate", json=body, timeout=30) as response:
+        next(response.iter_lines())
+    wait_until(lambda: server.engine.num_pending == 0)
+
+    metrics = scrape(server)
+    assert metrics["tinyserve_rejected_requests_total{reason=invalid}"] == 1
+    wait_until(lambda: scrape(server).get("tinyserve_requests_total{finish_reason=abort}") == 1)

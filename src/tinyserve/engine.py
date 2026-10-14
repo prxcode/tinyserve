@@ -9,7 +9,7 @@ from tinyserve.block_manager import BlockManager
 from tinyserve.kv_cache import KVCache, PagedBatch
 from tinyserve.model.llama import LlamaForCausalLM
 from tinyserve.sampling import sample
-from tinyserve.scheduler import Scheduler
+from tinyserve.scheduler import ScheduledBatch, Scheduler
 from tinyserve.sequence import FinishReason, SamplingParams, Sequence
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class Engine:
         if config.seed is not None:
             self.generator = torch.Generator(self.device).manual_seed(config.seed)
         self._next_id = itertools.count()
+        self.last_batch: ScheduledBatch | None = None
 
     def validate_request(self, prompt_ids: list[int], params: SamplingParams) -> None:
         """Raise ValueError for a request that can never run. Reads only fixed limits, so
@@ -88,6 +89,7 @@ class Engine:
     @torch.inference_mode()
     def step(self) -> list[StepOutput]:
         batch = self.scheduler.schedule()
+        self.last_batch = batch
         if batch is None:
             return []
         seqs = batch.sequences
@@ -130,7 +132,7 @@ class Engine:
         return token_ids
 
     def _finish_reason(self, seq: Sequence, token_id: int) -> FinishReason | None:
-        if token_id == self.eos_token_id:
+        if token_id == self.eos_token_id and not seq.params.ignore_eos:
             return FinishReason.STOP
         if len(seq.output_ids) >= seq.params.max_tokens:
             return FinishReason.LENGTH

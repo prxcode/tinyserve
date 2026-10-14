@@ -139,6 +139,17 @@ def test_stops_at_eos(model: LlamaForCausalLM, prompts: list[list[int]]) -> None
     assert seq.status is Status.FINISHED
 
 
+def test_ignore_eos_runs_to_max_tokens(model: LlamaForCausalLM, prompts: list[list[int]]) -> None:
+    engine = make_engine(model)
+    engine.eos_token_id = reference_greedy(model, prompts[0], 1)[0]
+
+    (seq,) = engine.generate([prompts[0]], SamplingParams(max_tokens=5, ignore_eos=True))
+
+    assert len(seq.output_ids) == 5
+    assert seq.output_ids[0] == engine.eos_token_id
+    assert seq.finish_reason == FinishReason.LENGTH
+
+
 def test_max_tokens_finishes_with_length_reason(
     model: LlamaForCausalLM, prompts: list[list[int]]
 ) -> None:
