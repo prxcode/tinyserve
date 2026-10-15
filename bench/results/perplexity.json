@@ -1,0 +1,33 @@
+{
+  "dataset": {
+    "name": "Salesforce/wikitext",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "file": "wikitext-2-raw-v1/test-00000-of-00001.parquet"
+  },
+  "model_dir": "TinyLlama-1.1B-Chat-v1.0",
+  "max_length": 1024,
+  "stride": 512,
+  "max_windows": null,
+  "device": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+  "torch": "2.14.0+cu126",
+  "python": "3.11.9",
+  "results": {
+    "fp16": {
+      "perplexity": 7.5685,
+      "scored_tokens": 341468,
+      "weight_bytes": 2200096768,
+      "seconds": 130.2
+    },
+    "int8": {
+      "perplexity": 7.5707,
+      "scored_tokens": 341468,
+      "weight_bytes": 1232001024,
+      "seconds": 156.3
+    }
+  },
+  "summary": {
+    "perplexity_change": 0.0022,
+    "perplexity_change_pct": 0.03,
+    "weight_memory_reduction_pct": 44.0
+  }
+}
