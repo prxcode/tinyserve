@@ -1,8 +1,8 @@
 # Benchmarks
 
-> **Status: no results yet.** The tooling below is finished. The measured numbers will be
-> taken on an AWS `g4dn.xlarge` (NVIDIA T4) and added here with the exact commit, hardware
-> and command that produced them. Until then this page makes no performance claims.
+> **Status: throughput and latency results pending.** The load-test tooling is finished, and
+> those numbers will be taken on an AWS `g4dn.xlarge` (NVIDIA T4). Int8 memory and perplexity
+> results are below; they are correctness numbers and do not depend on GPU speed.
 
 ## What is measured
 
@@ -87,6 +87,32 @@ sequence. So batching more sequences into each step is expected to raise through
 until the step becomes compute-bound or the KV cache runs out. That expectation is what the
 concurrency sweep will test.
 
-## Results
+## Int8 quantization
+
+Command: `uv run python bench/perplexity.py --out bench/results/perplexity.json`
+(raw output: [bench/results/perplexity.json](../bench/results/perplexity.json)).
+
+- Data: WikiText-2 raw test split, `Salesforce/wikitext` at revision `b08601e`. Lines are joined
+  with `"\n\n"`, which gives 341,469 TinyLlama tokens.
+- Windows: 1024 tokens with a stride of 512, so every token is scored exactly once with at
+  least 512 tokens of context after the first window.
+- Both variants ran in one process on the same tokens (RTX 3050 Ti Laptop, torch 2.14.0+cu126).
+
+| Weights | Perplexity | Weight memory |
+|---|---|---|
+| fp16 | 7.5685 | 2,200,096,768 B (2098 MiB) |
+| int8 (decoder linears), fp16 embeddings and `lm_head` | 7.5707 | 1,232,001,024 B (1175 MiB) |
+| Change | +0.0022 (+0.03%) | −44.0% |
+
+The memory figure counts weights only. It does not depend on the GPU and can be checked
+from the layer shapes: 969M decoder-linear parameters go from 2 bytes to 1, plus one 2-byte
+scale per output channel. Perplexity was measured on a throttled, shared GPU. That makes the
+run slower but does not change its result.
+
+Speed is not reported here. int8 is expected to make decode slower, because each matmul
+converts the weights back to fp16 first (see [architecture.md](architecture.md#int8-weight-only-quantization)).
+Its latency will be measured with the throughput benchmarks.
+
+## Throughput and latency results
 
 Pending: to be measured on AWS `g4dn.xlarge` (T4, 16 GB) in the deployment phase.

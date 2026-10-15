@@ -19,7 +19,8 @@ status is updated in the same commit that lands the component.
 | Streaming detokenizer | `tinyserve.detokenizer` | implemented |
 | HTTP server | `tinyserve.server` | implemented |
 | Metrics | `tinyserve.metrics` | implemented |
-| Int8 weight quantization | `tinyserve.model.quant` | planned |
+| Int8 weight quantization | `tinyserve.model.quant` | implemented |
+| Perplexity evaluation | `tinyserve.evaluation`, `bench/perplexity.py` | implemented |
 
 ## Request lifecycle
 
@@ -70,6 +71,25 @@ The reason for writing the forward pass instead of calling `transformers` is the
 call: continuous batching needs every sequence in a batch to read keys and values from its own
 non-contiguous cache blocks, at its own position. That does not fit the padded
 `past_key_values` interface.
+
+### Int8 weight-only quantization
+
+`--quantize int8` replaces every linear layer inside the decoder layers with `Int8Linear`:
+
+- Each weight row is scaled so its largest magnitude maps to 127, then rounded. That is one
+  fp16 scale per output channel, and every weight is within half a step of its original value.
+- The forward pass is `F.linear(x, w_int8.to(fp16)) * scale`. Scaling the `[tokens, out]`
+  result instead of the `[out, in]` weight gives the same answer with less work.
+- Embeddings and `lm_head` stay in fp16. They are about 12% of the weights, and the output
+  projection is the layer most sensitive to rounding.
+- Quantization happens on CPU while loading, so the GPU never holds the fp16 weights.
+
+This is a memory optimization, not a speed one. Each matmul reads the int8 weight, writes an
+fp16 copy and reads that copy again, so a bandwidth-bound decode step moves more bytes than
+with fp16 weights. A real int8 kernel (int8 × int8 → int32 matmuls, or a fused
+dequantize-and-multiply) would be needed for a speedup. The saving goes to the KV cache
+instead: the engine profiles free memory after loading, so the 923 MiB saved can hold up to
+about 43,000 more tokens of KV cache (22 KiB per token), before `gpu_memory_fraction`.
 
 ## Paged KV cache
 

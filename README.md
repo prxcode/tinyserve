@@ -7,8 +7,8 @@ paged KV cache, a continuous-batching scheduler and a streaming HTTP API. It ser
 [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) on a single GPU.
 
 > **Status: early development.** The server streams generations from a continuous-batching
-> engine over a paged KV cache and exports Prometheus metrics. Benchmark results,
-> quantization and deployment are not done yet. The roadmap below tracks what is implemented;
+> engine over a paged KV cache, exports Prometheus metrics, and can load int8 weights.
+> Throughput benchmarks and deployment are not done yet. The roadmap below tracks what is implemented;
 > nothing unchecked should be assumed to work.
 
 ## Why
@@ -36,12 +36,16 @@ behind the main choices is in [docs/decisions.md](docs/decisions.md).
 - [x] Prometheus metrics and a reproducible load generator
 - [ ] Benchmark results (pending; to be measured on AWS `g4dn.xlarge`, see
   [docs/benchmarks.md](docs/benchmarks.md))
-- [ ] Int8 weight-only quantization with a perplexity evaluation
+- [x] Int8 weight-only quantization with a perplexity evaluation
 - [ ] Docker image and an AWS EC2 deployment guide
 
 Benchmark results will be published with the exact hardware, model and workload used. No
 numbers are listed until they have been measured. [docs/benchmarks.md](docs/benchmarks.md)
 describes the method, and why a first attempt on a laptop GPU was discarded.
+
+Measured so far: int8 weight-only quantization cuts TinyLlama's weight memory by 44.0%
+(2098 → 1175 MiB) and changes WikiText-2 perplexity from 7.5685 to 7.5707 (+0.03%)
+([details](docs/benchmarks.md#int8-quantization)).
 
 ## Setup
 
@@ -78,7 +82,8 @@ uv run python -m tinyserve.server              # GPU if available, http://127.0.
 uv run python -m tinyserve.server --help       # scheduler and cache limits
 ```
 
-The KV cache is sized automatically on GPU. On CPU, pass `--num-blocks`.
+The KV cache is sized automatically on GPU. On CPU, pass `--num-blocks`. `--quantize int8`
+loads the decoder's weights as int8, which leaves more GPU memory for the KV cache.
 
 ```bash
 curl -N http://127.0.0.1:8000/v1/generate \
@@ -119,6 +124,8 @@ The prompt is sent to the model as raw text. TinyLlama-Chat's chat template is n
 - No authentication, and the server binds to `127.0.0.1` by default. Do not expose it to the
   public internet without a proxy in front of it (see [SECURITY.md](SECURITY.md)).
 - No chat template: prompts are completed as raw text.
+- int8 saves memory but not time: weights are converted back to fp16 for every matmul, so
+  decode is expected to be somewhat slower, not faster.
 - A non-streaming request keeps running after its client disconnects, up to `max_tokens`.
 
 ## Contributing
