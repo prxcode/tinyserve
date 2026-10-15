@@ -15,6 +15,7 @@ from tinyserve.detokenizer import IncrementalDecoder
 from tinyserve.engine import Engine, EngineConfig
 from tinyserve.model.llama import LlamaForCausalLM
 from tinyserve.model.loader import load_model
+from tinyserve.model.quant import weight_bytes
 from tinyserve.sequence import SamplingParams
 from tinyserve.tokenizer import Tokenizer
 
@@ -149,3 +150,25 @@ def test_gpu_cache_is_sized_to_fit_free_memory(tokenizer: Tokenizer) -> None:
     prompts = [tokenizer.encode(PROMPT)] * engine.config.max_num_seqs
     seqs = engine.generate(prompts, SamplingParams(max_tokens=4))
     assert all(len(seq.output_ids) == 4 for seq in seqs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
+def test_int8_model_is_smaller_and_still_coherent(
+    tokenizer: Tokenizer, input_ids: torch.Tensor
+) -> None:
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    baseline = torch.cuda.memory_allocated()
+
+    model = load_model(MODEL_DIR, "cuda", torch.float16, quantize=True)
+
+    # The GPU holds 1-byte decoder linears plus fp16 embeddings, lm_head and scales, never the
+    # full-precision copy (that would add about 2 GB). Measured peak was 5.8% above the weights'
+    # size, from the allocator rounding each of ~150 tensors up to its block size.
+    assert torch.cuda.max_memory_allocated() - baseline < weight_bytes(model) * 1.1
+    assert weight_bytes(model) < 0.6 * 2_200_000_000
+    ids = input_ids.cuda()
+    with torch.no_grad():
+        for _ in range(6):
+            ids = torch.cat([ids, model(ids)[:, -1].argmax(dim=-1, keepdim=True)], dim=1)
+    assert "Paris" in tokenizer.decode(ids[0, input_ids.shape[1] :].tolist())

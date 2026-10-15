@@ -173,11 +173,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-blocks", type=int, help="required on CPU; profiled on GPU")
     parser.add_argument("--gpu-memory-fraction", type=float, default=0.9)
     parser.add_argument("--max-pending", type=int, default=256)
+    parser.add_argument(
+        "--quantize", choices=["none", "int8"], default="none", help="int8 weight-only"
+    )
     return parser.parse_args(argv)
 
 
 def build_engine(args: argparse.Namespace) -> AsyncEngine:
-    model = load_model(args.model_dir, args.device)
+    model = load_model(args.model_dir, args.device, quantize=args.quantize == "int8")
     config = EngineConfig(
         num_blocks=args.num_blocks,
         gpu_memory_fraction=args.gpu_memory_fraction,
