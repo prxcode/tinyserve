@@ -26,6 +26,7 @@ cu126 = ["torch==2.14.0"]
 dev = [
     "httpx==0.28.1",
     "mypy==2.3.1",
+    "pyarrow==25.0.1",
     "pytest==9.1.1",
     "ruff==0.16.9",
     "transformers==5.17.0",
@@ -73,6 +74,11 @@ strict = true
 files = ["src", "bench"]
 # torch types nn.Module.__call__ as returning Any, which would flag every layer call.
 warn_return_any = false
+
+[[tool.mypy.overrides]]
+# pyarrow ships without type information; only bench/perplexity.py uses it.
+module = ["pyarrow.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
