@@ -7,8 +7,8 @@ paged KV cache, a continuous-batching scheduler and a streaming HTTP API. It ser
 [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) on a single GPU.
 
 > **Status: early development.** The server streams generations from a continuous-batching
-> engine over a paged KV cache. Metrics, benchmarks, quantization and deployment are not done
-> yet. Nothing unchecked in the roadmap should be assumed to work. The roadmap below tracks what is implemented;
+> engine over a paged KV cache and exports Prometheus metrics. Benchmark results,
+> quantization and deployment are not done yet. The roadmap below tracks what is implemented;
 > nothing unchecked should be assumed to work.
 
 ## Why
@@ -33,12 +33,15 @@ behind the main choices is in [docs/decisions.md](docs/decisions.md).
 - [x] Paged KV cache: block allocator, block tables and slot storage
 - [x] Scheduler with continuous batching and preemption
 - [x] Streaming HTTP API with backpressure and cancellation
-- [ ] Prometheus metrics and a reproducible load benchmark
+- [x] Prometheus metrics and a reproducible load generator
+- [ ] Benchmark results (pending; to be measured on AWS `g4dn.xlarge`, see
+  [docs/benchmarks.md](docs/benchmarks.md))
 - [ ] Int8 weight-only quantization with a perplexity evaluation
 - [ ] Docker image and an AWS EC2 deployment guide
 
 Benchmark results will be published with the exact hardware, model and workload used. No
-numbers are listed until they have been measured.
+numbers are listed until they have been measured. [docs/benchmarks.md](docs/benchmarks.md)
+describes the method, and why a first attempt on a laptop GPU was discarded.
 
 ## Setup
 
@@ -97,7 +100,9 @@ data: [DONE]
 Request fields: `prompt` (required), `max_tokens` (default 128), `temperature` (0 to 2,
 default 0 = greedy), `top_p` (above 0 and at most 1, default 1) and `stream` (default true).
 With `"stream": false` the response is one JSON object with `text`, `finish_reason` and
-`usage`. `GET /health` reports queue sizes and free cache blocks. Error codes are listed in
+`usage`. `GET /health` reports queue sizes and free cache blocks, and `GET /metrics`
+exports Prometheus metrics. `ignore_eos: true` keeps generating past the end-of-sequence token,
+which benchmarks use to fix output length. Error codes are listed in
 [docs/architecture.md](docs/architecture.md#failure-handling).
 
 The prompt is sent to the model as raw text. TinyLlama-Chat's chat template is not applied.

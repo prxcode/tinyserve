@@ -18,7 +18,7 @@ status is updated in the same commit that lands the component.
 | Engine thread and async bridge | `tinyserve.async_engine` | implemented |
 | Streaming detokenizer | `tinyserve.detokenizer` | implemented |
 | HTTP server | `tinyserve.server` | implemented |
-| Metrics | `tinyserve.metrics` | planned |
+| Metrics | `tinyserve.metrics` | implemented |
 | Int8 weight quantization | `tinyserve.model.quant` | planned |
 
 ## Request lifecycle
@@ -214,6 +214,23 @@ Non-streaming requests are not cancelled when the client disconnects. They run u
 
 ## Metrics
 
-Exposed in Prometheus format on `/metrics`: time to first token, inter-token latency and
-end-to-end latency (histograms), generated tokens, running and waiting queue sizes, and KV
-cache block utilization.
+Exposed in Prometheus format on `/metrics`.
+
+| Metric | Type | Where it is measured |
+|---|---|---|
+| `tinyserve_time_to_first_token_seconds` | histogram | HTTP layer, from request arrival to first token |
+| `tinyserve_inter_token_latency_seconds` | histogram | HTTP layer, between consecutive tokens of a request |
+| `tinyserve_request_latency_seconds` | histogram | HTTP layer, from arrival to the final token |
+| `tinyserve_requests_total{finish_reason}` | counter | HTTP layer, including `abort` for clients that hung up |
+| `tinyserve_rejected_requests_total{reason}` | counter | HTTP layer: `invalid` (400) or `unavailable` (503) |
+| `tinyserve_prompt_tokens_total`, `tinyserve_generated_tokens_total` | counter | HTTP layer |
+| `tinyserve_engine_step_seconds{kind}` | histogram | Engine thread, per prefill or decode step |
+| `tinyserve_engine_batch_size{kind}` | histogram | Engine thread, sequences per step |
+| `tinyserve_preemptions_total` | counter | Engine thread |
+| `tinyserve_running_requests`, `tinyserve_waiting_requests`, `tinyserve_pending_requests`, `tinyserve_kv_cache_usage_ratio` | gauge | Read from the scheduler when Prometheus scrapes |
+
+Request latencies are measured where tokens reach the HTTP layer, so they include the hop
+from the engine thread and match what a client sees, minus the network. Step times are
+measured around `Engine.step()`, which ends by copying sampled tokens to the CPU, so the GPU
+work is finished when the timer stops. Each server has its own Prometheus registry rather than
+the process-wide default, so tests can build many servers in one process.
