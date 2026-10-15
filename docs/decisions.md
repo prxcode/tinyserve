@@ -126,3 +126,20 @@ proper 400 or 503.
 may only read limits that never change after startup (model length, vocabulary size, cache
 size). Anything that depends on live scheduler state, such as free blocks, cannot be checked
 there.
+
+## 11. Weight-only int8 with per-channel scales, written by hand
+
+**Decision.** Quantize the decoder's linear weights to int8 with one symmetric scale per
+output channel. Keep activations, embeddings and `lm_head` in fp16, and dequantize inside the
+forward pass. No `bitsandbytes`.
+
+**Why.** Per-channel scales follow the large differences in magnitude between rows, which a
+single per-tensor scale would crush. Weight-only quantization keeps the activation path,
+which has outliers, in fp16. Writing it by hand keeps it to about 40 lines that can be
+explained and tested completely, and avoids a native dependency that is awkward on Windows.
+The measured cost on WikiText-2 is +0.03% perplexity for 44% less weight memory.
+
+**Cost.** No speedup, and probably a slowdown: the fp16 copy made for each matmul adds memory
+traffic to a step that is already bandwidth-bound. Getting a speedup needs an int8 matmul
+kernel, which is out of scope. The benefit is capacity: on a small GPU the saved memory
+becomes KV cache, which means more sequences can be batched at once.
