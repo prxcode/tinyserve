@@ -6,6 +6,7 @@ from safetensors import safe_open
 
 from tinyserve.model.config import LlamaConfig
 from tinyserve.model.llama import LlamaForCausalLM
+from tinyserve.model.quant import quantize_model
 
 
 def checkpoint_files(model_dir: Path) -> list[Path]:
@@ -30,9 +31,13 @@ def load_model(
     model_dir: Path,
     device: str | torch.device = "cpu",
     dtype: torch.dtype | None = None,
+    quantize: bool = False,
 ) -> LlamaForCausalLM:
-    device = torch.device(device)
-    dtype = dtype or default_dtype(device)
+    """Load a checkpoint. With quantize=True the decoder's linear layers become int8; the
+    quantization runs on CPU so the GPU never holds the full-precision weights."""
+    target = torch.device(device)
+    dtype = dtype or default_dtype(target)
+    device = torch.device("cpu") if quantize else target
     config = LlamaConfig.from_file(model_dir / "config.json")
 
     state: dict[str, torch.Tensor] = {}
@@ -55,4 +60,6 @@ def load_model(
 
     if config.tie_word_embeddings:
         model.lm_head.weight = model.model.embed_tokens.weight
+    if quantize:
+        model = quantize_model(model).to(target)
     return model.eval()

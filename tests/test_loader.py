@@ -7,6 +7,7 @@ import transformers
 from safetensors.torch import load_file, save_file
 
 from tinyserve.model.loader import load_model
+from tinyserve.model.quant import Int8Linear
 
 
 def save_reference_model(
@@ -90,3 +91,16 @@ def test_converts_to_requested_dtype(tmp_path: Path) -> None:
     model = load_model(tmp_path, dtype=torch.bfloat16)
 
     assert all(p.dtype == torch.bfloat16 for p in model.parameters())
+
+
+def test_quantized_load_replaces_decoder_linears(tmp_path: Path) -> None:
+    reference = save_reference_model(tmp_path)
+    input_ids = torch.randint(0, 128, (2, 10))
+
+    model = load_model(tmp_path, quantize=True)
+
+    assert isinstance(model.model.layers[0].mlp.up_proj, Int8Linear)
+    with torch.no_grad():
+        expected = reference(input_ids).logits
+        error = (model(input_ids) - expected).norm() / expected.norm()
+    assert error < 0.02
