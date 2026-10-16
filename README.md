@@ -25,6 +25,8 @@ each holds a growing KV cache. tinyserve explores the two standard answers to th
 
 The design is described in [docs/architecture.md](docs/architecture.md), and the reasoning
 behind the main choices is in [docs/decisions.md](docs/decisions.md).
+[docs/performance-model.md](docs/performance-model.md) predicts, from spec-sheet bandwidth and
+FLOPS, how fast each kind of step can possibly be, before anything is measured.
 
 ## Roadmap
 

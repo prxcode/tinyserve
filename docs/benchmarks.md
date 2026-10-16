@@ -4,6 +4,9 @@
 > those numbers will be taken on an AWS `g4dn.xlarge` (NVIDIA T4). Int8 memory and perplexity
 > results are below; they are correctness numbers and do not depend on GPU speed.
 
+Every result here is checked against the lower bounds in
+[performance-model.md](performance-model.md), which were written before the measurements.
+
 ## What is measured
 
 `bench/load_test.py` is a closed-loop load generator. For each concurrency level `N` it
